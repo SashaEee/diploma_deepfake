@@ -1,0 +1,10 @@
+adaptation:
+  adapt_lr: 1.0e-5
+  adapt_batch: 32
+  confidence_high: 0.9
+  confidence_low: 0.1
+  window: 1000
+  kl_threshold: 0.35
+  rollback_eer_tolerance: 0.02
+  target_params: ["head", "proj"]
+  validation_set: "data/processed/adaptation_val/"

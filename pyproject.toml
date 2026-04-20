@@ -1,0 +1,73 @@
+[project]
+name = "deepfake-detector"
+version = "1.0.0"
+description = "Adaptive deepfake detection system (EDN-Ad)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "A. M. Zenkovsky" }]
+
+dependencies = [
+    "torch>=2.2,<3.0",
+    "torchvision>=0.17,<1.0",
+    "torchmetrics>=1.3",
+    "timm>=0.9.12",
+    "facenet-pytorch>=2.5.3",
+    "opencv-python-headless>=4.9",
+    "av>=11.0",
+    "numpy>=1.26,<2.0",
+    "scipy>=1.11",
+    "pillow>=10.0",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "pyyaml>=6.0",
+    "typer>=0.9",
+    "rich>=13.7",
+    "fastapi>=0.109",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.6",
+    "celery>=5.3",
+    "redis>=5.0",
+    "prometheus-client>=0.19",
+    "tensorboard>=2.15",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.26",
+    "ruff>=0.1.15",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+]
+onnx = ["onnx>=1.15", "onnxruntime>=1.17"]
+
+[project.scripts]
+deepfake-cli = "deepfake_detector.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepfake_detector"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --cov=src/deepfake_detector --cov-report=term-missing"

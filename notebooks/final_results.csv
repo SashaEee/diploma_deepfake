@@ -1,0 +1,3 @@
+Датасет,AUROC,F1,EER
+"DFDC (val, in-domain)",0.9262,0.8425,0.1757
+CelebDF-v2 (cross-dataset),0.6613,0.6492,0.3596
