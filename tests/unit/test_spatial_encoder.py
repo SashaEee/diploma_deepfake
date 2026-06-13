@@ -215,6 +215,7 @@ class TestSpatialEncoder:
     def test_batch_size_one(self, spatial_encoder):
         """Batch size == 1 обрабатывается без ошибок."""
         x = torch.randn(1, 3, 224, 224)
+        spatial_encoder.eval()
         with torch.no_grad():
             out = spatial_encoder(x)
         assert out.shape == (1, 512)
@@ -224,8 +225,8 @@ class TestSpatialEncoder:
         x = torch.randn(2, 3, 64, 64)
         out = spatial_encoder(x)
         out.sum().backward()
-        assert spatial_encoder.proj.weight.grad is not None
-        assert spatial_encoder.proj.weight.grad.abs().sum() > 0
+        assert spatial_encoder.proj[0].weight.grad is not None
+        assert spatial_encoder.proj[0].weight.grad.abs().sum() > 0
 
     def test_eval_mode_is_deterministic(self, spatial_encoder):
         """В eval-режиме одинаковый вход всегда даёт одинаковый выход."""
@@ -244,5 +245,5 @@ class TestSpatialEncoder:
 
     def test_proj_dimensions(self, spatial_encoder):
         """proj: Linear(128×3 → embed_dim) — правильные размерности."""
-        assert spatial_encoder.proj.in_features == 128 * 3
-        assert spatial_encoder.proj.out_features == 512
+        assert spatial_encoder.proj[0].in_features == 128 * 3
+        assert spatial_encoder.proj[0].out_features == 512
