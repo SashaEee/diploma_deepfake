@@ -1,5 +1,10 @@
 # 🧬 EDN-Ad — Deepfake Detector
 
+[![CI](https://github.com/SashaEee/diploma_deepfake/actions/workflows/ci.yml/badge.svg)](https://github.com/SashaEee/diploma_deepfake/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
+
 > **English summary:** Video & image deepfake detector — EfficientNet-B0 spatial encoder + adaptive-dilated TCN over time, with a FastAPI/Celery service, a real-time webcam demo, and online domain adaptation. Built in PyTorch.
 
 Система обнаружения дипфейков на видео и изображениях. Покадрово извлекает и выравнивает лицо, кодирует пространственные признаки на **EfficientNet-B0** (FPN + SE), агрегирует их во времени **адаптивным dilated-TCN** и выдаёт вероятность синтеза лица. В комплекте — REST-API на FastAPI с асинхронной обработкой видео через Celery/Redis, веб-демо с камерой и режим онлайн-адаптации к смене домена.
