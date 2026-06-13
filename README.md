@@ -1,285 +1,295 @@
-# EDN-Ad — Deepfake Detector
+# 🧬 EDN-Ad — Deepfake Detector
 
-**EDN-Ad** (EfficientNet-B0 + Dilated TCN + ArcFace — Adaptive) — система обнаружения дипфейков с онлайн-адаптацией к смене домена.
+> **English summary:** Video & image deepfake detector — EfficientNet-B0 spatial encoder + adaptive-dilated TCN over time, with a FastAPI/Celery service, a real-time webcam demo, and online domain adaptation. Built in PyTorch.
 
-Дипломная работа: Зенковский А. М., ЮФУ
+Система обнаружения дипфейков на видео и изображениях. Покадрово извлекает и выравнивает лицо, кодирует пространственные признаки на **EfficientNet-B0** (FPN + SE), агрегирует их во времени **адаптивным dilated-TCN** и выдаёт вероятность синтеза лица. В комплекте — REST-API на FastAPI с асинхронной обработкой видео через Celery/Redis, веб-демо с камерой и режим онлайн-адаптации к смене домена.
+
+Дипломный проект (А. М. Зенковский, ЮФУ). Лицензия — MIT.
 
 ---
 
-## Архитектура
+## 📌 Что это
+
+**EDN-Ad** = **E**fficientNet **D**ilated-TCN **N**etwork, **Ad**aptive.
+
+Конвейер принимает на вход видеофайл, изображение или поток с камеры. Из кадров детектируется и аффинно выравнивается лицо (MTCNN), затем последовательность из `T = 16` кадров проходит через пространственный и временной энкодеры. На выходе — вероятность того, что лицо является дипфейком, вердикт `real` / `fake` и оценка уверенности.
+
+> ⚠️ **Важно про голову модели.** В коде есть две классификационные «головы»:
+> - **`ArcFaceHead`** (угловой margin, `metric_head.py`) — соответствует исходному ТЗ и сохранена для совместимости и тестов;
+> - **линейная голова + BCE** (`nn.Linear(embed_dim, 1)`, `full_model.py`) — именно она используется обученной моделью и в инференсе.
+>
+> Текущий обученный детектор работает с **линейной головой и бинарным логитом**, а не с ArcFace. Это явно отражено в коде (`DeepfakeDetector.head`).
+
+Репозиторий **не содержит** датасетов и поставляет код пайплайна; веса (`best_model.pt`) загружаются отдельно. Часть CLI-команд и интеграционных тестов оставлена заглушками — см. раздел [«Статус»](#-статус).
+
+---
+
+## ✨ Возможности
+
+- 🎞️ **Анализ видео** — потоковое декодирование (PyAV), равномерное семплирование `T` кадров, паддинг при нехватке.
+- 🖼️ **Анализ изображений** — одиночное лицо реплицируется на `T` кадров для временного энкодера.
+- 📷 **Реальное время с камеры** — скользящий буфер кадров (`deque`), вердикт усредняется по последним результатам.
+- 🧠 **Гибридная архитектура** — EfficientNet-B0 + FPN + SE (пространство) и адаптивный dilated-TCN с GLU (время).
+- 🔁 **Онлайн-адаптация** — мониторинг доменного дрейфа по KL-расхождению гистограмм активаций и дообучение только `head` + `proj` на уверенных псевдо-метках.
+- 🌐 **REST API (FastAPI)** — синхронный разбор изображений, асинхронная обработка видео через Celery + Redis, эндпоинты `/health` и `/metrics` (Prometheus).
+- 💻 **Веб-демо** — отдельный сервер `demo_server.py` с тёмным UI, drag-and-drop загрузкой и режимом камеры.
+- 🛠️ **CLI (Typer)** — команды `single` и `batch` для обработки файлов.
+- 📦 **Docker Compose** — API, Celery-воркер, Redis и Prometheus одной командой.
+- 🔍 **Grad-CAM** — модуль визуализации активаций (`inference/gradcam.py`).
+- 📤 **Экспорт в ONNX** — скрипт `scripts/export_onnx.py`.
+
+---
+
+## 🏗️ Архитектура
 
 ```
-Видеофайл / Изображение
-       │
-       ▼
- ┌─────────────────────────────────────────────┐
- │           Препроцессинг                     │
- │  VideoLoader → FaceDetector (MTCNN)         │
- │  → FaceAligner (аффинное выравнивание)      │
- │  → FrameNormalizer (ImageNet-нормализация)  │
- └───────────────────┬─────────────────────────┘
-                     │ (T=16, 3, 224, 224) float32
+Видео / Изображение / Кадр камеры
+        │
+        ▼
+┌──────────────────────────────────────────────┐
+│  Препроцессинг                               │
+│  VideoLoader (PyAV, T=16) → FaceDetector     │
+│  (MTCNN) → аффинное выравнивание к 5 точкам  │
+│  (224×224) → FrameNormalizer (ImageNet)      │
+└────────────────────┬─────────────────────────┘
+                     │ (B, T=16, 3, 224, 224)
                      ▼
- ┌─────────────────────────────────────────────┐
- │           Spatial Encoder                   │
- │  EfficientNet-B0 (features_only, stages 2-4)│
- │  → FPN (3 уровня, 128 каналов)              │
- │  → SE-блоки (Squeeze-and-Excitation × 3)   │
- │  → Linear(384 → 512)                        │
- └───────────────────┬─────────────────────────┘
-                     │ (B, T=16, D=512)
+┌──────────────────────────────────────────────┐
+│  Spatial Encoder                             │
+│  EfficientNet-B0 (timm, features_only,       │
+│  out_indices 2,3,4) → FPN (3 уровня, 128 ch) │
+│  → SE-блоки ×3 → concat → Linear(384→512)+BN │
+└────────────────────┬─────────────────────────┘
+                     │ (B, T, 512)
                      ▼
- ┌─────────────────────────────────────────────┐
- │           Temporal Encoder                  │
- │  Adaptive-Dilated TCN (6 слоёв)             │
- │  Дилатации: 1, 2, 4, 8, 16, 32             │
- │  GLU-активация, LayerNorm, Dropout=0.1      │
- │  Дилатация адаптируется к motion energy     │
- │  → mean-pooling по временной оси            │
- └───────────────────┬─────────────────────────┘
-                     │ (B, D=512)
+┌──────────────────────────────────────────────┐
+│  Temporal Encoder (Adaptive Dilated TCN)     │
+│  N блоков, каузальные 1D-свёртки + GLU,       │
+│  LayerNorm, residual; дилатация выбирается    │
+│  динамически по «энергии движения» кадров     │
+│  → mean-pooling по времени                   │
+└────────────────────┬─────────────────────────┘
+                     │ (B, 512)
                      ▼
- ┌─────────────────────────────────────────────┐
- │           ArcFace Head                      │
- │  Angular margin: s=32.0, m=0.5              │
- │  2 класса: real / fake                      │
- └───────────────────┬─────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Head: Dropout → Linear(512→1)  ⇒  логит     │
+│  (ArcFaceHead доступна для совместимости)     │
+└────────────────────┬─────────────────────────┘
                      │
                      ▼
-              Вероятность deepfake
+   sigmoid → probability ∈ [0,1] → verdict + confidence
 ```
 
----
+**Ключевые детали реализации (из кода):**
 
-## Что подаётся на вход
+- **`AdaptiveDilatedConv1d`** — каузальная свёртка, где дилатация `d` пересчитывается на лету из усреднённой «энергии движения» последовательности (`φ = 1/(1+energy)`), затем применяется GLU (`a * sigmoid(b)`).
+- **Число слоёв TCN** задаётся конфигом (`base.yaml` → 2, `efficient_tcn.yaml` → 6); базовые дилатации блоков — степени двойки (`1, 2, 4, …`).
+- **`shortcut_reg`** — регуляризатор против «срезания углов»: `(mean(|spatial|) − 0.5)²`.
+- **`CombinedLoss`** = классификационная (BCE для линейной головы / CE для ArcFace) + `temporal_consistency_loss` (косинусная согласованность соседних эмбеддингов) + `shortcut_reg`.
+- **`remap_state_dict`** — переименование ключей чекпоинта, обученного на Kaggle, под имена слоёв проекта.
+- **Confidence** считается как `1 − H/ln2`, где `H` — энтропия Бернулли предсказанной вероятности.
+- **Адаптация:** `DomainMonitor` копит гистограммы активаций в окне `window`, сравнивает с эталоном симметризованным KL; при `KL > kl_threshold` `AdaptiveTrainer` дообучает только параметры `head`/`proj` на псевдо-метках с `prob > 0.9` или `< 0.1`.
 
-| Режим           | Вход                                                   | Ограничения               |
-|-----------------|--------------------------------------------------------|---------------------------|
-| **Видео**       | MP4, MOV, AVI, WebM                                   | до 200 МБ (настраивается) |
-| **Изображение** | JPEG, PNG, BMP (RGB, любой размер)                    | —                         |
-| **Батч**        | Список путей к видеофайлам                             | —                         |
-
-Система сама извлекает лицо из каждого кадра через MTCNN, выравнивает его аффинным преобразованием к каноническим 5 ориентирам (224×224 пкс) и нормализует по ImageNet-статистике. Если лицо не найдено — кадр пропускается, при нехватке кадров последний повторяется.
-
----
-
-## Что получается на выходе
+### Формат ответа
 
 ```jsonc
-// Для видео и изображения:
+// Изображение / видео (CLI, /predict/image, результат Celery-задачи)
 {
-  "probability": 0.847,       // вероятность дипфейка [0.0 — 1.0]
-  "verdict": "fake",          // "fake" если prob >= 0.5, иначе "real"
-  "confidence": 0.71,         // уверенность модели [0.0 — 1.0] (1 — энтропия)
-  "processing_ms": 312        // время обработки в миллисекундах
-}
-```
-
-Через REST API асинхронное видео возвращает `job_id`, статус которого опрашивается отдельно:
-
-```jsonc
-// GET /predict/video/{job_id}
-{
-  "job_id": "uuid-...",
-  "status": "done",          // "pending" | "done" | "error"
-  "probability": 0.91,
-  "verdict": "fake",
-  "confidence": 0.84,
-  "processing_ms": 1240
+  "probability": 0.847,   // вероятность дипфейка [0..1]
+  "verdict": "fake",      // "fake" если probability >= threshold, иначе "real"; "no_face" если лицо не найдено
+  "confidence": 0.71,     // 1 − нормированная энтропия Бернулли
+  "face_detected": true,
+  "processing_ms": 312
 }
 ```
 
 ---
 
-## Датасеты
+## 🧰 Стек
 
-Собственных данных проект **не включает** — нужны лицензионные датасеты. Система обучается на публичных бенчмарках:
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-EE4C2C?logo=pytorch&logoColor=white)
+![timm](https://img.shields.io/badge/timm-EfficientNet--B0-792EE5)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688?logo=fastapi&logoColor=white)
+![Celery](https://img.shields.io/badge/Celery-5.3+-37814A?logo=celery&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-broker-DC382D?logo=redis&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-headless-5C3EE8?logo=opencv&logoColor=white)
+![PyAV](https://img.shields.io/badge/PyAV-FFmpeg-007808)
+![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)
+![Typer](https://img.shields.io/badge/Typer-CLI-2C2255)
+![Prometheus](https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
-| Датасет                  | Размер             | Назначение              | Доступ              |
-|--------------------------|--------------------|-------------------------|---------------------|
-| **FaceForensics++**      | ~1.5 ТБ (raw)      | Обучение + валидация    | [github.com/ondyari/FaceForensics](https://github.com/ondyari/FaceForensics) — нужен запрос |
-| **DFDC**                 | ~470 ГБ            | Cross-датасет тест      | Kaggle              |
-| **CelebDF-v2**           | ~3 ГБ              | Cross-датасет тест      | [github.com/yuezunli/celeb-deepfakeforensics](https://github.com/yuezunli/celeb-deepfakeforensics) |
-
-**FaceForensics++** содержит 4 типа манипуляций: `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures` в трёх качествах (raw, c23, c40). Система обучалась на сжатии c23.
-
-### Формат манифеста для обучения
-
-```json
-[
-  {"path": "/data/ff++/fake/Deepfakes/001_003.mp4", "label": 1, "manipulation": "Deepfakes"},
-  {"path": "/data/ff++/real/original/001.mp4",      "label": 0, "manipulation": "none"}
-]
-```
+- **ML:** PyTorch, torchvision, torchmetrics, timm (EfficientNet-B0), facenet-pytorch (MTCNN).
+- **Видео/изображения:** PyAV, OpenCV (headless), Pillow, NumPy, SciPy.
+- **Сервис:** FastAPI, Uvicorn, Celery, Redis, prometheus-client, python-multipart.
+- **Конфиги/CLI:** Pydantic + pydantic-settings, PyYAML, Typer, Rich.
+- **Обучение:** scikit-learn, TensorBoard, matplotlib, tqdm.
+- **Dev:** pytest (+cov, +asyncio), ruff, mypy, pre-commit; опционально `onnx` / `onnxruntime`.
 
 ---
 
-## Установка
+## 🚀 Запуск
+
+### 1. Установка
 
 ```bash
-# Python 3.10+
-git clone <repo>
-cd deepfake-detector
+git clone https://github.com/SashaEee/diploma_deepfake.git
+cd diploma_deepfake
 
 python -m venv .venv
-source .venv/bin/activate        # Linux/macOS
-# .venv\Scripts\activate         # Windows
+source .venv/bin/activate          # Linux/macOS
+# .venv\Scripts\activate           # Windows
 
 pip install --upgrade pip
-pip install -e ".[dev]"
+pip install -e ".[dev]"            # +[onnx] — для экспорта в ONNX
 ```
 
----
+Требуется **Python ≥ 3.10**. Для работы с видео в системе нужен **FFmpeg** (в Docker-образ он уже включён).
 
-## Обучение
+### 2. Веса модели
+
+Репозиторий не содержит готовых весов в стандартном пути. Положите чекпоинт в `checkpoints/best_model.pt` (путь задаётся в `configs/base.yaml → inference.checkpoint_path`) либо скачайте его:
 
 ```bash
-python scripts/train.py \
-    --config configs/base.yaml \
-    --manifest /data/ff++/train_manifest.json \
-    --val-manifest /data/ff++/val_manifest.json
+# из output Kaggle-ноутбука (нужен настроенный ~/.kaggle/kaggle.json)
+python scripts/download_weights.py --source kaggle --kernel <user>/<kernel>
+
+# или по прямой ссылке
+python scripts/download_weights.py --source url --url https://example.com/best_model.pt
 ```
 
-Гиперпараметры по умолчанию (`configs/base.yaml`):
+> Если чекпоинт не найден, модель инициализируется случайно (предобучен только backbone EfficientNet-B0 из timm) — предсказания в этом случае не имеют смысла.
 
-| Параметр            | Значение      | Описание                            |
-|---------------------|---------------|-------------------------------------|
-| `embed_dim`         | 512           | Размер пространства признаков       |
-| `n_layers`          | 6             | Число блоков TCN                    |
-| `arc_s / arc_m`     | 32.0 / 0.5    | Масштаб и margin ArcFace            |
-| `batch`             | 4             | Физический батч                     |
-| `grad_accum`        | 16            | Накопление → эффективный батч = 64  |
-| `lr`                | 3e-4          | AdamW learning rate                 |
-| `epochs`            | 60            | Cosine annealing                    |
-| `mixed`             | true          | BF16 mixed precision                |
-
----
-
-## Инференс
-
-### CLI
+### 3. Веб-демо (камера + загрузка изображений)
 
 ```bash
-# Одно видео
+python demo_server.py
+# открыть http://127.0.0.1:7860
+```
+
+### 4. CLI
+
+```bash
+# один файл (видео или изображение)
 deepfake-cli single --config configs/base.yaml --input sample.mp4
+deepfake-cli single --config configs/base.yaml --input face.jpg --output result.json
 
-# Батч файлов
-deepfake-cli batch --config configs/base.yaml \
-    --input-dir ./videos/ --output report.json
-
-# Оценка на датасете
-deepfake-cli eval --config configs/base.yaml \
-    --manifest ff++_val.json --metrics auroc,f1,eer
-
-# Онлайн-адаптация к новому домену
-deepfake-cli adapt --config configs/adaptation.yaml --stream ./new_data/
+# пакетная обработка каталога (*.mp4, *.avi)
+deepfake-cli batch --config configs/base.yaml --input-dir ./videos/ --output report.json
 ```
 
-### REST API
+### 5. REST API
 
 ```bash
 uvicorn deepfake_detector.api.main:app --host 0.0.0.0 --port 8080
+```
 
-# Изображение (синхронно, ~300 мс)
-curl -X POST http://localhost:8080/predict/image \
-     -F "file=@face.jpg"
+| Метод и путь                  | Назначение                                              |
+|-------------------------------|---------------------------------------------------------|
+| `POST /predict/image`         | Синхронный анализ изображения (multipart `file`)        |
+| `POST /predict/video`         | Постановка видео в очередь Celery → `{job_id}`           |
+| `GET  /predict/video/{job_id}`| Статус и результат задачи (`pending`/`running`/`done`)  |
+| `GET  /health`                | Проверка живости и версия модели                        |
+| `GET  /metrics`               | Метрики в формате Prometheus                             |
 
-# Видео (асинхронно через Celery + Redis)
-curl -X POST http://localhost:8080/predict/video \
-     -F "file=@video.mp4"
+```bash
+curl -X POST http://localhost:8080/predict/image -F "file=@face.jpg"
+
+curl -X POST http://localhost:8080/predict/video -F "file=@video.mp4"
 # → {"job_id": "...", "estimated_ms": 5000}
+curl http://localhost:8080/predict/video/<job_id>
+```
 
-curl http://localhost:8080/predict/video/{job_id}
-# → {"status": "done", "probability": 0.91, ...}
+> Для эндпоинтов `/predict/video/*` нужен запущенный Redis и Celery-воркер (см. Docker ниже). Брокер берётся из переменной окружения `CELERY_BROKER` (по умолчанию `redis://localhost:6379/0`).
 
-# Здоровье сервиса
+### 6. Docker Compose
+
+Поднимает API, Celery-воркер, Redis и Prometheus:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
 curl http://localhost:8080/health
 ```
 
-### Docker
+Образ ожидает веса в `./checkpoints` и конфиги в `./configs` (монтируются как volume).
+*Примечание: сервис `prometheus` ссылается на `docker/prometheus.yml` — добавьте этот файл или отключите сервис, если он вам не нужен.*
+
+---
+
+## 🎓 Обучение
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
-curl http://localhost:8080/health
+python scripts/train.py \
+    --config configs/efficient_tcn.yaml \
+    --manifest /data/train_manifest.json \
+    --val-manifest /data/val_manifest.json
 ```
 
----
+Манифест — JSON-список объектов с полями пути и метки (`0` = real, `1` = fake). Гиперпараметры — в `configs/*.yaml` (эффективный батч = `batch × grad_accum`, mixed precision, веса лоссов `lam_arc/lam_tc/lam_short`).
 
-## Онлайн-адаптация
-
-`DomainMonitor` отслеживает KL-дивергенцию гистограмм активаций от опорного распределения. При обнаружении дрейфа домена (`KL > 0.35`) `AdaptiveTrainer` дообучает только `head` и `proj` (~0.03% параметров) на псевдо-метках с высокой уверенностью (> 0.9).
-
-```
-configs/adaptation.yaml:
-  adapt_lr: 1e-5
-  confidence_high: 0.9
-  window: 1000          # сколько последних активаций хранить
-  kl_threshold: 0.35
-```
-
----
-
-## Тесты
+Экспорт в ONNX:
 
 ```bash
-# Все unit-тесты (134 шт., ~5 сек)
-pytest tests/unit/ -v
-
-# С покрытием
-pytest tests/unit/ --cov=src/deepfake_detector --cov-report=term-missing
+python scripts/export_onnx.py --config configs/base.yaml \
+    --weights checkpoints/best_model.pt --output deepfake_detector.onnx
 ```
-
-Покрытие ключевых модулей:
-
-| Модуль                  | Покрытие |
-|-------------------------|----------|
-| `video_loader.py`       | 100 %    |
-| `face_detector.py`      | 100 %    |
-| `losses.py`             | 100 %    |
-| `monitor.py`            | 100 %    |
-| `spatial_encoder.py`    | 100 %    |
-| `temporal_encoder.py`   | 100 %    |
-| `metric_head.py`        | 100 %    |
 
 ---
 
-## Структура проекта
+## 🧪 Тесты
+
+```bash
+pytest                              # все тесты
+pytest tests/unit -v                # только unit
+pytest --cov=src/deepfake_detector  # с покрытием
+```
+
+Unit-тесты покрывают модели, лоссы, препроцессинг и монитор адаптации. Каталоги `tests/integration` и `tests/smoke` присутствуют как заготовки.
+
+---
+
+## 📁 Структура проекта
 
 ```
-deepfake-detector/
+diploma_deepfake/
 ├── configs/
-│   ├── base.yaml           # основные гиперпараметры
-│   └── adaptation.yaml     # параметры онлайн-адаптации
+│   ├── base.yaml            # инференс по умолчанию (TCN=2 слоя, линейная голова)
+│   ├── efficient_tcn.yaml   # обучение (TCN=6, freeze backbone, ArcFace-параметры)
+│   └── adaptation.yaml      # параметры онлайн-адаптации
 ├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
+│   ├── Dockerfile           # python:3.10-slim + ffmpeg, editable install
+│   └── docker-compose.yml   # api + worker + redis + prometheus
 ├── scripts/
-│   ├── train.py
-│   ├── evaluate.py
-│   └── export_onnx.py
+│   ├── train.py             # точка входа обучения
+│   ├── evaluate.py          # оценка (заглушка)
+│   ├── download_weights.py  # загрузка весов (Kaggle / URL)
+│   └── export_onnx.py       # экспорт в ONNX
+├── notebooks/               # Kaggle-ноутбуки обучения, чекпоинты, метрики
+├── demo_server.py           # веб-демо (FastAPI + HTML UI, порт 7860)
 ├── src/deepfake_detector/
-│   ├── models/             # SpatialEncoder, TemporalEncoder, ArcFaceHead, DeepfakeDetector
-│   ├── preprocessing/      # VideoLoader, FaceDetector, FaceAligner, FrameNormalizer
-│   ├── training/           # Trainer, CombinedLoss, VideoDataset, Augmentation
-│   ├── adaptation/         # DomainMonitor, AdaptiveTrainer, CheckpointManager
-│   ├── inference/          # Predictor, GradCAM
-│   ├── api/                # FastAPI, Celery tasks, Pydantic schemas
-│   ├── cli.py              # Typer CLI
-│   └── utils/              # config, seed, logging
-└── tests/
-    ├── unit/               # 134 теста — все зелёные
-    ├── integration/        # не реализованы (заглушки)
-    └── smoke/              # не реализованы (заглушки)
+│   ├── models/              # spatial_encoder, temporal_encoder, metric_head, full_model
+│   ├── preprocessing/       # video_loader, face_detector, aligner, normalizer
+│   ├── training/            # trainer, dataset, losses, augmentation
+│   ├── adaptation/          # monitor, adaptive_trainer, checkpoint_manager
+│   ├── inference/           # predictor, gradcam
+│   ├── api/                 # main (FastAPI), tasks (Celery), schemas (Pydantic)
+│   ├── cli.py               # Typer CLI
+│   └── utils/               # config (Pydantic), seed, logging
+└── tests/                   # unit / integration / smoke
 ```
 
 ---
 
-## Зависимости
+## 📋 Статус
 
-- Python ≥ 3.10
-- PyTorch ≥ 2.2
-- timm (EfficientNet-B0)
-- facenet-pytorch (MTCNN)
-- OpenCV, PyAV, NumPy
-- FastAPI, Celery, Redis
-- Typer (CLI)
+Что реализовано и работает: пространственный и временной энкодеры, препроцессинг видео/лиц, инференс (файл, изображение, камера), FastAPI + Celery-сервис, веб-демо, онлайн-адаптация, экспорт в ONNX, загрузка весов, unit-тесты.
+
+Заглушки / не завершено (по коду): команды CLI `eval` и `adapt` выводят «not yet implemented»; `scripts/evaluate.py` не реализован; каталоги `tests/integration` и `tests/smoke` — заготовки.
+
+---
+
+## 📄 Лицензия
+
+MIT — см. файл [`LICENSE`](LICENSE).
